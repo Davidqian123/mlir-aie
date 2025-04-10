@@ -15,17 +15,15 @@ from aie.iron.controlflow import range_
 from aie.helpers.util import np_ndarray_type_get_shape
 
 
-def my_eltwise_add(dev, trace_size):
-
-    word_size_in = 2
+def my_eltwise_mul_add(dev, trace_size):
     N = 65536
-    N_in_bytes = N * word_size_in
 
     # Tile sizes
     n = 1024
     N_div_n = N // n
 
-    n_cores = 2
+    # Number of cores to use
+    n_cores = 1
     tiles = N_div_n // n_cores
 
     tensor_ty = np.ndarray[(N,), np.dtype[bfloat16]]
@@ -35,13 +33,18 @@ def my_eltwise_add(dev, trace_size):
     A_ty = np.ndarray[(n,), np.dtype[bfloat16]]
     B_ty = np.ndarray[(n,), np.dtype[bfloat16]]
     C_ty = np.ndarray[(n,), np.dtype[bfloat16]]
+    D_ty = np.ndarray[(n,), np.dtype[bfloat16]]
 
     # Type used in the memory tile which aggregates across the 2 cores
     A_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
     B_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
     C_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
+    D_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
 
     # AIE Core Function declarations
+    eltwise_mul_bf16_vector = Kernel(
+        "eltwise_mul_bf16_vector", "mul.o", [tile_ty, tile_ty, tile_ty]
+    )
     eltwise_add_bf16_vector = Kernel(
         "eltwise_add_bf16_vector", "add.o", [tile_ty, tile_ty, tile_ty]
     )
@@ -71,39 +74,93 @@ def my_eltwise_add(dev, trace_size):
         names=[f"memB{i}" for i in range(n_cores)],
     )
 
-    # Output C
-    outC = ObjectFifo(C_memTile_ty, name="outC")
+    # Input C
+    inC = ObjectFifo(C_memTile_ty, name="inC")
     of_offsets = [
         (np.prod(np_ndarray_type_get_shape(C_memTile_ty)) // n_cores) * i
         for i in range(n_cores)
     ]
-    outC_fifos = outC.prod().join(
+    inC_fifos = inC.cons().split(
         of_offsets,
         obj_types=[C_ty] * n_cores,
         names=[f"memC{i}" for i in range(n_cores)],
     )
 
-    # Task for the cores to perform
-    def core_fn(of_a, of_b, of_c, eltwise_add):
+    # Intermediate buffer for multiplication result
+    intBuf = ObjectFifo(D_memTile_ty, name="intBuf")
+    of_offsets = [
+        (np.prod(np_ndarray_type_get_shape(D_memTile_ty)) // n_cores) * i
+        for i in range(n_cores)
+    ]
+    intBuf_prod_fifos = intBuf.prod().join(
+        of_offsets,
+        obj_types=[D_ty] * n_cores,
+        names=[f"intBuf_prod{i}" for i in range(n_cores)],
+    )
+    intBuf_cons_fifos = intBuf.cons().split(
+        of_offsets,
+        obj_types=[D_ty] * n_cores,
+        names=[f"intBuf_cons{i}" for i in range(n_cores)],
+    )
+
+    # Output D (final result)
+    outD = ObjectFifo(D_memTile_ty, name="outD")
+    of_offsets = [
+        (np.prod(np_ndarray_type_get_shape(D_memTile_ty)) // n_cores) * i
+        for i in range(n_cores)
+    ]
+    outD_fifos = outD.prod().join(
+        of_offsets,
+        obj_types=[D_ty] * n_cores,
+        names=[f"memD{i}" for i in range(n_cores)],
+    )
+
+    # Task for the cores to perform multiplication
+    def mul_core_fn(of_a, of_b, of_out, eltwise_mul):
         for _ in range_(tiles):
-            elem_out = of_c.acquire(1)
+            elem_out = of_out.acquire(1)
+            elem_in_a = of_a.acquire(1)
+            elem_in_b = of_b.acquire(1)
+            eltwise_mul(elem_in_a, elem_in_b, elem_out)
+            of_a.release(1)
+            of_b.release(1)
+            of_out.release(1)
+
+    # Task for the cores to perform addition
+    def add_core_fn(of_a, of_b, of_out, eltwise_add):
+        for _ in range_(tiles):
+            elem_out = of_out.acquire(1)
             elem_in_a = of_a.acquire(1)
             elem_in_b = of_b.acquire(1)
             eltwise_add(elem_in_a, elem_in_b, elem_out)
             of_a.release(1)
             of_b.release(1)
-            of_c.release(1)
+            of_out.release(1)
 
-    # Set up workers to perform the tasks
+    # Create workers to perform the multiplication
     workers = []
     for i in range(n_cores):
         workers.append(
             Worker(
-                core_fn,
+                mul_core_fn,
                 fn_args=[
                     inA_fifos[i].cons(),
                     inB_fifos[i].cons(),
-                    outC_fifos[i].prod(),
+                    intBuf_prod_fifos[i].prod(),
+                    eltwise_mul_bf16_vector,
+                ],
+            )
+        )
+
+    # Create workers to perform the addition
+    for i in range(n_cores):
+        workers.append(
+            Worker(
+                add_core_fn,
+                fn_args=[
+                    intBuf_cons_fifos[i].cons(),
+                    inC_fifos[i].cons(),
+                    outD_fifos[i].prod(),
                     eltwise_add_bf16_vector,
                 ],
             )
@@ -111,11 +168,12 @@ def my_eltwise_add(dev, trace_size):
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
-    with rt.sequence(tensor_ty, tensor_ty, tensor_ty) as (A, B, C):
+    with rt.sequence(tensor_ty, tensor_ty, tensor_ty, tensor_ty) as (A, B, C, D):
         rt.start(*workers)
         rt.fill(inA.prod(), A)
         rt.fill(inB.prod(), B)
-        rt.drain(outC.cons(), C, wait=True)
+        rt.fill(inC.prod(), C)
+        rt.drain(outD.cons(), D, wait=True)
 
     # Place components (assign them resources on the device) and generate an MLIR module
     return Program(dev, rt).resolve_program(SequentialPlacer())
@@ -132,5 +190,5 @@ try:
     trace_size = 0 if (len(sys.argv) != 3) else int(sys.argv[2])
 except ValueError:
     print("Argument is not an integer")
-module = my_eltwise_add(dev, trace_size)
+module = my_eltwise_mul_add(dev, trace_size)
 print(module)
