@@ -249,4 +249,14 @@ Interested in contributing MLIR-AIE? [Information for developers](./CONTRIBUTING
 
 -----
 
-<p align="center">Copyright&copy; 2019-2024 Advanced Micro Devices, Inc</p>
+# How to set up env before running programming examples
+
+```bash
+source /opt/xilinx/xrt/setup.sh
+xrt-smi examine
+
+source ironenv/bin/activate
+
+source utils/env_setup.sh
+```
+

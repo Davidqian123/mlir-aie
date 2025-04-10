@@ -470,9 +470,57 @@ def main(opts):
     # ------------------------------------------------------
     print("\nAvg NPU time: {}us.".format(int((npu_time_total / num_iter) / 1000)))
 
+    # Convert to numpy arrays for analysis
+    aie_np = ofm_mem_fmt_out.detach().numpy()
+    golden_np = golden_output.detach().numpy()
+    
+    # Compute statistics
+    print("\n=== Output Comparison Statistics ===")
+    print(f"Device: {opts.xclbin.split('/')[-1]}")
+    
+    # Shape information
+    print(f"AIE output shape: {aie_np.shape}")
+    print(f"Golden output shape: {golden_np.shape}")
+    
+    # Basic statistics
+    print("\nAIE Output Stats:")
+    print(f"  Min: {np.min(aie_np)}, Max: {np.max(aie_np)}, Mean: {np.mean(aie_np):.4f}")
+    
+    print("Golden Output Stats:")
+    print(f"  Min: {np.min(golden_np)}, Max: {np.max(golden_np)}, Mean: {np.mean(golden_np):.4f}")
+    
+    # Compute element-wise differences
+    diff = aie_np - golden_np
+    abs_diff = np.abs(diff)
+    
+    print("\nDifference Stats:")
+    print(f"  Min Diff: {np.min(diff)}, Max Diff: {np.max(diff)}")
+    print(f"  Mean Absolute Diff: {np.mean(abs_diff):.4f}")
+    print(f"  Max Absolute Diff: {np.max(abs_diff)}")
+    print(f"  Comparison Tolerance: {block_2_relu_3}")
+    
+    # Show first 20 values comparison
+    print("\nFirst 20 values comparison (AIE vs Golden):")
+    flat_aie = aie_np.flatten()
+    flat_golden = golden_np.flatten()
+    for i in range(20):
+        print(f"  [{i}]: {flat_aie[i]} vs {flat_golden[i]} (diff: {flat_aie[i] - flat_golden[i]})")
+    
+    # Count elements exceeding tolerance
+    exceed_count = np.sum(abs_diff > block_2_relu_3)
+    exceed_percent = 100 * exceed_count / diff.size
+    print(f"\nElements exceeding tolerance: {exceed_count} ({exceed_percent:.2f}%)")
+    
+    # Find indices of maximum differences
+    if exceed_count > 0:
+        max_idx = np.argmax(abs_diff)
+        max_indices = np.unravel_index(max_idx, diff.shape)
+        print(f"Location of maximum difference: {max_indices}")
+        print(f"Values at max diff: AIE={aie_np[max_indices]}, Golden={golden_np[max_indices]}")
+    
     if np.allclose(
-        ofm_mem_fmt_out.detach().numpy(),
-        golden_output.detach().numpy(),
+        aie_np,
+        golden_np,
         rtol=0,
         atol=block_2_relu_3,
     ):

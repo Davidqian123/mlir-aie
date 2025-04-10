@@ -27,3 +27,8 @@ utils/vitisVariables.config
 runtime_lib/xaiengine/src
 /ironenv
 /.cache
+
+**/_build
+**/build
+**/log
+**.exe
