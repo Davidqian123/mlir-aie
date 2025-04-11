@@ -22,8 +22,8 @@ def my_eltwise_mul(dev, trace_size):
     n = 1024
     N_div_n = N // n
 
-    n_cores = 2
-    tiles = N_div_n // n_cores
+    # n_cores = 2
+    tiles = N_div_n
 
     tensor_ty = np.ndarray[(N,), np.dtype[bfloat16]]
     tile_ty = np.ndarray[(n,), np.dtype[bfloat16]]
@@ -34,9 +34,9 @@ def my_eltwise_mul(dev, trace_size):
     C_ty = np.ndarray[(n,), np.dtype[bfloat16]]
 
     # Type used in the memory tile which aggregates across the 2 cores
-    A_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
-    B_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
-    C_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
+    # A_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
+    # B_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
+    # C_memTile_ty = np.ndarray[(n * n_cores,), np.dtype[bfloat16]]
 
     # AIE Core Function declarations
     eltwise_mul_bf16_vector = Kernel(
@@ -45,40 +45,40 @@ def my_eltwise_mul(dev, trace_size):
 
     # AIE-array data movement with object fifos
     # Input A
-    inA = ObjectFifo(A_memTile_ty, name="inA")
-    of_offsets = [
-        (np.prod(np_ndarray_type_get_shape(A_memTile_ty)) // n_cores) * i
-        for i in range(n_cores)
-    ]
-    inA_fifos = inA.cons().split(
-        of_offsets,
-        obj_types=[A_ty] * n_cores,
-        names=[f"memA{i}" for i in range(n_cores)],
-    )
+    inA = ObjectFifo(A_ty, name="inA")
+    # of_offsets = [
+    #     (np.prod(np_ndarray_type_get_shape(A_memTile_ty)) // n_cores) * i
+    #     for i in range(n_cores)
+    # ]
+    # inA_fifos = inA.cons().split(
+    #     of_offsets,
+    #     obj_types=[A_ty] * n_cores,
+    #     names=[f"memA{i}" for i in range(n_cores)],
+    # )
 
     # Input B
-    inB = ObjectFifo(B_memTile_ty, name="inB")
-    of_offsets = [
-        (np.prod(np_ndarray_type_get_shape(B_memTile_ty)) // n_cores) * i
-        for i in range(n_cores)
-    ]
-    inB_fifos = inB.cons().split(
-        of_offsets,
-        obj_types=[B_ty] * n_cores,
-        names=[f"memB{i}" for i in range(n_cores)],
-    )
+    inB = ObjectFifo(B_ty, name="inB")
+    # of_offsets = [
+    #     (np.prod(np_ndarray_type_get_shape(B_memTile_ty)) // n_cores) * i
+    #     for i in range(n_cores)
+    # ]
+    # inB_fifos = inB.cons().split(
+    #     of_offsets,
+    #     obj_types=[B_ty] * n_cores,
+    #     names=[f"memB{i}" for i in range(n_cores)],
+    # )
 
     # Output C
-    outC = ObjectFifo(C_memTile_ty, name="outC")
-    of_offsets = [
-        (np.prod(np_ndarray_type_get_shape(C_memTile_ty)) // n_cores) * i
-        for i in range(n_cores)
-    ]
-    outC_fifos = outC.prod().join(
-        of_offsets,
-        obj_types=[C_ty] * n_cores,
-        names=[f"memC{i}" for i in range(n_cores)],
-    )
+    outC = ObjectFifo(C_ty, name="outC")
+    # of_offsets = [
+    #     (np.prod(np_ndarray_type_get_shape(C_memTile_ty)) // n_cores) * i
+    #     for i in range(n_cores)
+    # ]
+    # outC_fifos = outC.prod().join(
+    #     of_offsets,
+    #     obj_types=[C_ty] * n_cores,
+    #     names=[f"memC{i}" for i in range(n_cores)],
+    # )
 
     # Task for the cores to perform
     def core_fn(of_a, of_b, of_c, eltwise_mul):
@@ -93,18 +93,17 @@ def my_eltwise_mul(dev, trace_size):
 
     # Create workers to perform the task
     workers = []
-    for i in range(n_cores):
-        workers.append(
-            Worker(
-                core_fn,
-                fn_args=[
-                    inA_fifos[i].cons(),
-                    inB_fifos[i].cons(),
-                    outC_fifos[i].prod(),
-                    eltwise_mul_bf16_vector,
-                ],
-            )
+    workers.append(
+        Worker(
+            core_fn,
+            fn_args=[
+                inA.cons(),
+                inB.cons(),
+                outC.prod(),
+                eltwise_mul_bf16_vector,
+            ],
         )
+    )
 
     # Runtime operations to move data to/from the AIE-array
     rt = Runtime()
